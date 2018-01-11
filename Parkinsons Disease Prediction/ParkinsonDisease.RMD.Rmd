@@ -1,0 +1,265 @@
+---
+title: "Prediction of Patient Status using Voice Measurements"
+author: "Vaibhav Gokhale"
+date: "September 14, 2017"
+output: html_document
+---
+
+## INTRODUCTION
+The Parkinson's disease (PD) is a type of neurological disease. Many neurological diseases affect phonation of patients, and voice can be a valuable aid in the diagnosis of neurological disease. In Parkinson's disease, voice disorders affect approximately 45% of patients. In this clinical research case study, the aim is to  examine whether by solely using vocal measurements, PD patients can be discriminated from healthy people.
+
+Data Source : https://archive.ics.uci.edu/ml/datasets/parkinsons
+
+## APPROACH
+This is a binary classification problem.  
+The two objectives of the study are:
+1. To examine the data mining methods that produce least type I and type II errors.
+2. To find out voice measurements which would significantly contribute in distinguishing PD patients from healthy people.  
+*Data Description*  
+The data consists of  voice measurements from 31 people, 23 with Parkinson's disease (PD). Each column in the table is a particular voice measure, and each row corresponds one of 195 voice recording from these individuals ("name" column). The main aim of the data is to discriminate healthy people from those with PD, according to "status" column which is set to 0 for healthy and 1 for PD.
+
+## DATA PREPROCESSING
+
+Load the required libraries.
+```{r cache=FALSE, warning=FALSE, message=FALSE}
+library(caret)
+library(MASS)
+library(glmnet)
+library(DMwR)
+library(reshape2)
+library(ggplot2)
+library(ROCR)
+```
+
+Clear the environment variables and import the data
+```{r include=FALSE}
+rm(list = ls(all=TRUE))
+```
+
+```{r}
+PD_data <- read.csv("parkinsons_data.csv",header = T)
+str(PD_data)
+summary(PD_data)
+```
+    All the variables have appropriate data types
+    There is only one column of datatype factors which is the target varible.
+    All other are numeric columns.
+
+
+*Check the target variable*
+```{r}
+table(PD_data$status)
+```
+
+It is critical to identify "Parkinson's".  
+Hence, the positive class is "Parkinson's" and negative class is "Normal".  
+Lets us replace positive class with "1" and negative class with "0".
+```{r}
+PD_data$status <- as.factor(as.character(ifelse(PD_data$status=="Normal","0","1")))
+table(PD_data$status)
+```
+
+    The given data is imbalanced data.  
+    Accuracy of the prediction would not be the appropriate metric to examine the models.
+    The evaluation metric to be considered should be Kappa value.
+
+Take a look at the data using the "head()" and "tail()" functions
+```{r}
+head(PD_data)
+tail(PD_data)
+```
+
+Check for the missing values in the dataset
+```{r}
+sum(is.na(PD_data))
+```
+    There are no missing values
+
+**Exploratory Analysis**  
+Check for the collinearity among the predictors.
+```{r}
+# separate the numeric data
+PD_data_num=PD_data[,sapply(PD_data,is.numeric)]
+# correlation matrix
+cor_mat <- round(cor(PD_data_num),2)
+head(cor_mat[,1:5])
+melted_cormat <- data.frame(melt(cor_mat))
+head(melted_cormat)
+ggplot(data = melted_cormat, aes(x=Var1, y=Var2, fill=value)) + geom_tile() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+  
+**Train/Test Split**  
+Split the data 70/30 into train and test sets, using Stratified Sampling.
+```{r cache=FALSE}
+set.seed(123)
+rows=createDataPartition(PD_data$status,p = 0.7,list = F)
+train <- PD_data[rows,]
+test <- PD_data[-rows,]
+cat("number of rows in the original data =", nrow(PD_data),"\n")
+cat("number of rows in the train data =", nrow(train),"\n")
+cat("number of rows in the test data =", nrow(test),"\n")
+```
+
+
+## Model building
+
+**Basic Logistic Regression Model**  
+
+Build a model using all the variables, excluding the response variable, in the dataset
+
+```{r warning=FALSE}
+model_logreg_basic <- glm(status~.,family = "binomial",data = train)
+summary(model_logreg_basic)
+```
+
+    Summary of the model shows that none of the variables is significant.    
+    Before doing further steps we must improve the model.
+    One of the options is to perform the Principal Component Analysis (PCA) which will produce the independent vectors(Principal Components) which are linear combination of original features.
+
+**Perform PCA and build the logistic regression model on Principal Components**
+```{r}
+pca <- prcomp(train[,-which(names(train) %in% "status")],scale. = T,center = T)
+summary(pca)
+```
+
+    From the summary of the PCA model, it can be seen that about 68% variation is expained by first two principal components and about 90% variation is explained by first six principal components.
+    
+* Plot the screeplot of the variance explained by each principal component.  
+```{r}
+screeplot(pca,type="barplot",npcs = 22)
+screeplot(pca,type="lines",npcs = 12)
+abline(h = 1,col="red")
+```
+    
+**Two of the widely used approaches for selecting the number of principal components to retain:**  
+
+1. Shoulder approach
+Select the number of PCs to retain as the number of PCs before the shoulder.  
+According to this approch number of PCs to retain = 2
+2. eigen-value-greater-than-one approch
+According to this approch number of PCs to retain = 5  
+
+Let us build two separate models with 2 and 5 components respectively and decide the better model by calculating different evaluation metrics.  
+
+Create the dataframes with two and five components respectively and include the response variable
+```{r}
+n1=2
+n2=5
+assign(paste("df_",n1,"cmp",sep = ""),data.frame(pca$x[,1:n1],status=train$status))
+assign(paste("df_",n2,"cmp",sep = ""),data.frame(pca$x[,1:n2],status=train$status))
+```
+
+Build model with two and five principal components
+```{r}
+model_logreg_2cmp <- glm(status~.,data = df_2cmp,family = "binomial")
+model_logreg_5cmp <- glm(status~.,data = df_5cmp,family = "binomial")
+
+summary(model_logreg_2cmp)
+summary(model_logreg_5cmp)
+```
+
+
+
+    There are two insignificant components present in the model with 5 PCs.
+    Let us run a stepwise regression to remove insignificant components.
+
+Perform the stepwise regression
+```{r cache=FALSE}
+stepAIC(model_logreg_5cmp,direction = "both")
+```
+    
+    The stepAIC procedure shows that PC3 and PC4 are not significant and those should be removed from the formula.  
+    Let us modify the formula for the logistic regression model with 4 components.  
+    This model now has only 3 PCs as attributes
+
+Modified formula for model with 3 PCs   
+```{r}
+model_logreg_3cmp <- glm(formula = status ~ PC1 + PC2 + PC5, family = "binomial",data = df_5cmp)
+summary(model_logreg_3cmp)
+```
+
+
+The output is probability of success. Now we need to decide a threshold for it.  
+
+
+Check for the Area Under Curve (AUC) value for ROC curve.
+```{r}
+pred_status_2cmp <- predict(model_logreg_2cmp,df_2cmp[,-3],type="response")
+pred_status_3cmp <- predict(model_logreg_3cmp,df_5cmp[,-c(3,4)],type="response")
+
+pred2 <- ROCR::prediction(predictions = pred_status_2cmp,labels = train$status)
+pred3 <- ROCR::prediction(predictions = pred_status_3cmp,labels = train$status)
+
+perf_auc2 <- performance(pred2, measure="auc")
+perf_auc3 <- performance(pred3, measure="auc")
+
+# Access the auc score from the performance object
+auc2 <- perf_auc2@y.values[[1]]
+auc3 <- perf_auc3@y.values[[1]]
+print(auc2)
+print(auc3)
+```
+
+    The value of AUC is decently large for both the models.   
+    Model with 3 principal components has slightly higher AUC
+
+Let us plot the the ROC curve for both the models and decide the threshhold limits.
+```{r cache=FALSE}
+perf2 <- ROCR::performance(pred2,measure = "tpr",x.measure = "fpr")
+perf3 <- ROCR::performance(pred3,measure = "tpr",x.measure = "fpr")
+
+plot(perf2,col=rainbow(10),colorsize=T,print.cutoffs.at=seq(0,1,0.1))
+plot(perf3,col=rainbow(10),colorsize=T,print.cutoffs.at=seq(0,1,0.1))
+```
+
+
+**From the TPR vs FPR plot, it is wise to select p = 0.8 as threshold**   
+
+Generate the projections using the first two principal components using biplot
+```{r cache=FALSE}
+ggbiplot::ggbiplot(pca,groups = train$status,obs.scale = 0.2,var.scale = 0.2,ellipse = T,circle = F,varname.size = 1.5,varname.abbrev = T)
+
+```
+
+## PREDICTION
+
+Now that we got the threshold probabilities for sucess. Make predictions on test data
+
+Perform the PCA on the test data
+```{r}
+test_pca2 <- data.frame(predict(pca,newdata=test))[,1:2]
+test_pca3 <- data.frame(predict(pca,newdata=test))[,c(1,2,5)]
+```
+
+Make predictions on the test data
+```{r}
+pred_test_prob2 <- predict(model_logreg_2cmp,test_pca2,type = "response")
+pred_test2 <- ifelse(pred_test_prob2 <= 0.8,0,1)
+pred_test_prob3 <- predict(model_logreg_3cmp,test_pca3,type = "response")
+pred_test3 <- ifelse(pred_test_prob3 <= 0.8,0,1)
+```
+
+
+Construct the confusion matrices
+```{r cache=FALSE}
+caret::confusionMatrix(pred_test2,test$status,positive="1")
+caret::confusionMatrix(pred_test3,test$status,positive="1")
+```
+
+    For model with 2 PCs, Kappa : 0.3428
+    For model wirh 3 PCs, Kappa : 0.5628
+    There is substantial difference between these values. Model with 3 components outperforms the model with only 2 components with the addition of only one extra dimension.
+
+##CONCLUSION
+1. Logistic Regression performed with Principal Components Analysis (PCA) is good for predicting Parkinson's Disease patients using vocal measures.  
+2. Type-I error = False Positives = 6  
+3. Type-II error = False Negatives = 5
+
+
+
+
+
+
+
+
+    
