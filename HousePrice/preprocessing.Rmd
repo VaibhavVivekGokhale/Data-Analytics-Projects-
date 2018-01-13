@@ -1,0 +1,412 @@
+---
+title: "House Prices: Advanced Regression Techniques Part1: Preprocessing"
+author: "Vaibhav Gokhale"
+date: "September 19, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r include=FALSE}
+rm(list = ls(all=T))
+library(DMwR)
+library(dplyr)
+library(moments)
+library(caret)
+library(GGally)
+library(car)
+library(vegan)
+
+```
+## Importing datas
+
+**import the train and test data**
+```{r}
+train <- read.csv("train.csv",header = T,stringsAsFactors = F)
+test <- read.csv("test.csv",header = T,stringsAsFactors = F)
+# setdiff(names(train),names(test))
+test$SalePrice <- rep(0,nrow(test))
+train$trainORtest <- rep("train",nrow(train)) # Identifier
+test$trainORtest <- rep("test",nrow(test))
+```
+
+**Combine the dataframes, assign appropriate datatypes**
+```{r}
+df <- rbind(train,test)
+```
+
+**Check structure of the data; Assign appropriate data types**
+```{r}
+# str(df)
+
+# Remove ID (Not required)
+df$Id <- NULL
+
+# Categorical Variables
+cat_var <- c("MSSubClass","OverallQual","OverallCond","MoSold","FullBath","HalfBath","BsmtFullBath","BsmtHalfBath","BedroomAbvGr","KitchenAbvGr","TotRmsAbvGrd","GarageCars","Fireplaces","YrSold")
+df[,cat_var] <- lapply(df[,cat_var],function(x)as.character(x))
+```
+
+## Missing values
+
+**Total number of missing values**
+```{r}
+## Function for finding number of missing values in each column.
+colmis <- function(df){
+  miss <- sort(apply(df[,-ncol(df)],2,function(x)sum(is.na(x))),decreasing = T)
+  miss[miss!=0]
+}
+
+colmis(df)
+```
+
+## Strategy for imputing missing values
+1. Perform exploraory data analysis(EDA). Perform the imputation based on the inferences of EDA.
+3. For each variable, leave the remaining values as it is if there are no substantial evidences to impute these values.
+4. After EDA, if unique rows with missing values are negligible delete those rows. Else, use KNN imputation or decision trees with subset of independent variables to impute them.
+
+**NOTE : From the data description file following variables have NA as "No object"**  
+These are treated as missing values by R.  
+"Alley","BsmtQual","BsmtCond","BsmtExposure","BsmtFinType1","BsmtFinType2","FireplaceQu","GarageType","GarageFinish","GarageQual","GarageCond","PoolQC","Fence","MiscFeature"
+
+#### Look at the missing values of each variable.
+
+**PoolQC #NA=2909**
+```{r}
+sum(is.na(df$PoolQC[df$PoolArea==0])) #2906 
+df$PoolQC[df$PoolArea==0 & is.na(df$PoolQC)] <- "N/A"
+```
+    Still three values are missing. Plot the PoolArea vs PoolQC
+```{r}
+boxplot(df$PoolArea~df$PoolQC)
+```
+    See the pool areas where PoolQC values are still missing
+```{r}
+df$PoolArea[is.na(df$PoolQC)]
+```
+    Lets replace the PoolQC values according to their areas
+```{r}
+df$PoolQC[is.na(df$PoolQC) & df$PoolArea==368] <- "Ex"
+df$PoolQC[is.na(df$PoolQC) & df$PoolArea==444] <- "Ex"
+df$PoolQC[is.na(df$PoolQC) & df$PoolArea==561] <- "Fa"
+```
+
+**Misclaneous #NA = 2814**
+```{r}
+sum(is.na(df$MiscFeature[df$MiscVal==0])) #2813
+df$MiscFeature[is.na(df$MiscFeature) & df$MiscVal==0 ] <- "N/A"
+```
+
+**Alley #NA = 2721**
+* Intuitively, Alley is not correlated with any other variable
+```{r}
+df$Alley[is.na(df$Alley)] <- "N/A"
+```
+
+**Fence #NA = 2348**
+***Generally houses that have Pool have fence for privacy.***
+```{r}
+sum(is.na(df$Fence) & df$PoolArea==0) 
+```
+    Above logic stands; Same records have missing values in the column of Fence and PoolArea.
+    
+Replace thos values with "N/A"
+```{r}
+df$Fence[is.na(df$Fence) & df$PoolArea==0] <- "N/A"
+table(df$PoolQC,df$Fence) ## When there is pool there is always fence.
+```
+    It can be seen that, when there is pool. There is definitely some kind of fence
+    However, from the above frequency table it is hard to see any relation between fence quality and the pool quality
+    For the timebeing keep the missing values of fence as it is.
+    
+**FireplaceQu #NA=1420**
+```{r}
+sum(is.na(df$FireplaceQu) & df$Fireplaces==0)
+df$FireplaceQu[is.na(df$FireplaceQu) & df$Fireplaces==0] <- "N/A"
+```
+
+### LotFrontage #NA = 486
+First intuition is that LotArea must be realted to the LotConfig.
+```{r}
+boxplot(df$LotFrontage~df$LotConfig)
+```
+
+    The above intuition holds. There is varition in the lot frontage based on the configuration.
+
+With the Geometric consideration, the other variable that may cause variation in the lotfrontage is lot area.
+
+```{r}
+plot(df$LotArea[1:200],df$LotFrontage[1:200])
+par(mfrow=c(2,3))
+plot(df$LotArea[df$LotConfig=="Corner"],df$LotFrontage[df$LotConfig=="Corner"],xlab="LotArea",ylab="LotFrontage")
+plot(df$LotArea[df$LotConfig=="CulDSac"],df$LotFrontage[df$LotConfig=="CulDSac"],xlab="LotArea",ylab="LotFrontage")
+plot(df$LotArea[df$LotConfig=="FR2"],df$LotFrontage[df$LotConfig=="FR2"],xlab="LotArea",ylab="LotFrontage")
+plot(df$LotArea[df$LotConfig=="FR3"],df$LotFrontage[df$LotConfig=="FR3"],xlab="LotArea",ylab="LotFrontage")
+plot(df$LotArea[df$LotConfig=="Inside"],df$LotFrontage[df$LotConfig=="Inside"],xlab="LotArea",ylab="LotFrontage")
+```
+
+    LotFrontage and LotArea seem to be linearly correlated when subset according to the lot configuration.  
+
+Let us check the correlation coefficients in each case
+```{r}
+Configs <- unique(df$LotConfig)
+for (i in 1:length(Configs)){
+  dftemp <- df[(df$LotConfig==Configs[i] & !(is.na(df$LotArea) | is.na(df$LotFrontage))),c("LotArea","LotFrontage")]
+  corcoef <- cor(dftemp$LotArea,dftemp$LotFrontage)
+  cat("Correlation Coefficient when LotConfig is",Configs[i],"=",corcoef,"\n")
+}
+rm(dftemp)
+rm(Configs)
+rm(corcoef)
+```
+
+    It can be seen that when the Lot is not inside there is high correlation.
+
+We can use linear regression models for imputation when the lot is at corner or has frontage on 2 or 3 sides
+Lets right a function to do this imputation
+```{r}
+imputeLinRegLotFr <- function(ConfigType){
+  df_temp <- df[(df$LotConfig == ConfigType & !(is.na(df$LotArea) | is.na(df$LotFrontage))),c("LotArea","LotFrontage")]
+  df_temp_impute <- df[(df$LotConfig == ConfigType & !is.na(df$LotArea) & is.na(df$LotFrontage)),c("LotArea","LotFrontage")]
+  mod_lm <- lm(LotFrontage~LotArea,data = df_temp)
+  predict(mod_lm,df_temp_impute)
+}
+
+df$LotFrontage[is.na(df$LotFrontage) & df$LotConfig == "FR2"] <- imputeLinRegLotFr("FR2")
+df$LotFrontage[is.na(df$LotFrontage) & df$LotConfig == "FR3"] <- imputeLinRegLotFr("FR3")
+df$LotFrontage[is.na(df$LotFrontage) & df$LotConfig == "Corner"] <- imputeLinRegLotFr("Corner")
+rm(imputeLinRegLotFr)
+```
+
+```{r}
+sum(is.na(df$LotFrontage))
+```
+
+    Still 358 values of LotFrontage are missing which is a large number.
+    
+Let us perform the Decision trees Imputation for the remaining values of the LotFrontage using CART algorithm for regression.
+```{r}
+# subset of possible independent variables as predictors.
+predictors <- c("LotArea","LotConfig","LotShape","LandContour","LandSlope", "BldgType","HouseStyle","X1stFlrSF","LotFrontage")
+df_pred <- df[,predictors]
+dtrees <- rpart::rpart(LotFrontage~.,data = df_pred[1:nrow(train),])
+df$LotFrontage <- predict(dtrees,newdata = df)
+sum(is.na(df$LotFrontage))
+rm(df_pred,dtrees,predictors)
+```
+
+**Garage related variables**
+GarageYrBlt  #NA = 159
+GarageFinish #NA = 159
+GarageQual   #NA = 159
+GarageCond   #NA = 159
+GarageType   #NA = 157
+```{r}
+sum(is.na(df$GarageYrBlt) & is.na(df$GarageFinish) & is.na(df$GarageQual) & is.na(df$GarageCond) & is.na(df$GarageType))
+
+# Garage area for missing values of the garage related variables
+table(df$GarageArea[is.na(df$GarageYrBlt) & is.na(df$GarageFinish) & is.na(df$GarageQual) & is.na(df$GarageCond) & is.na(df$GarageType)])
+```
+
+    All the missing values in the 5 garage attributes lie in the same observations.  
+    For all these observations garage area is zero.  
+
+Replace the missing values for these variables as "N/A"
+```{r}
+garage_missing_var <- c("GarageYrBlt","GarageFinish","GarageQual","GarageCond","GarageType")
+df[,garage_missing_var][is.na(df[,garage_missing_var]) & df$GarageArea==0] <- "N/A"
+rm(garage_missing_var)
+```
+
+**Basement related variables**
+BsmtCond     #NA = 82
+BsmtExposure #NA = 82
+BsmtQual     #NA = 81
+BsmtFinType2 #NA = 80
+BsmtFinType1 #NA = 79
+       
+```{r}
+sum(is.na(df$BsmtCond) & is.na(df$BsmtExposure) & is.na(df$BsmtQual) & is.na(df$BsmtFinType2) & is.na(df$BsmtFinType1))
+
+# Total basement area for the missing values of garage related variables
+table(df$TotalBsmtSF[is.na(df$BsmtCond) & is.na(df$BsmtExposure) & is.na(df$BsmtQual) & is.na(df$BsmtFinType2) & is.na(df$BsmtFinType1) & df$TotalBsmtSF==0])
+```
+
+    All the missing values in the 5 basement attributes lie in the same observations
+    For all these observations basement area is zero. 
+
+Replace the missing values for these variables as "N/A"
+```{r}
+bsmt_var <- c("BsmtCond","BsmtQual","BsmtFinType2","BsmtFinType1")
+df[,bsmt_var][is.na(df[,bsmt_var]) & df$TotalBsmtSF==0] <- "N/A"
+df$BsmtExposure[is.na(df$BsmtExposure)] <- "No"
+rm(bsmt_var)
+```
+    
+**Veneer related variables**
+MasVnrType #NA = 24
+MasVnrArea #NA = 23
+```{r}
+sum(is.na(df$MasVnrArea) & is.na(df$MasVnrType))
+sum(df$MasVnrArea==0,na.rm = T)
+```
+
+    23 of the missing values for masonry veneer type and masonry veneer area lie in the same row
+    Considerable number of masonry veneer area have value = 0
+    
+Let us replace missing values with "N/A" for type and 0 for area
+```{r}
+rows <- which(is.na(df$MasVnrType) & is.na(df$MasVnrArea), arr.ind=TRUE)
+df$MasVnrArea[rows] <- 0
+df$MasVnrType[rows] <- "N/A"
+rm(rows)
+```
+
+**MSZoning #NA = 4**
+Intutively there should be some relation between zoning and neighbourhood
+Let us check it using frequency tables
+```{r}
+table(df$MSZoning,df$Neighborhood)
+```
+
+    From the above table, it is clear that most of the houses in a particular neighbourhood have a corresponding particular type of zoning classification
+
+```{r}
+df$Neighborhood[is.na(df$MSZoning)]
+```
+
+    Majority of the houses with neighbourhood "Mitchel" have RL that is residential low density zoning classification. It is fair to replace such missing values with "RL"
+```{r}
+df$MSZoning[is.na(df$MSZoning) & df$Neighborhood == "Mitchel"] <- "RL"
+```
+
+    For Iowa DOT and Rail road neighbourhood there are 22 commercial and 68 Residential medium density zonings. It is difficult to decide which value should be used for imputation.
+
+Let us also consider another relevant attribute which are condition1 and condition2
+```{r}
+table(df$Condition1[df$Neighborhood=="IDOTRR"],df$MSZoning[df$Neighborhood=="IDOTRR"])
+table(df$Condition2[df$Neighborhood=="IDOTRR"],df$MSZoning[df$Neighborhood=="IDOTRR"])
+```
+
+```{r}
+df$Condition1[is.na(df$MSZoning)]
+df$Condition2[is.na(df$MSZoning)]
+```
+
+    All are norm. It is difficult to clearly decide the right imputation value.
+
+*Missing values have been imputed for all the variables based on inferences from Exploratory Data Analysis (EDA) and CART decision trees for LotFrontage.*
+
+As this is the competition. Any row cannot be deleted from the test data. Hence, separate the train and test data for final imputation process.  
+Let us check unique number of rows with missing values in the train data
+```{r}
+sum(unique(is.na(df[df$trainORtest=="train",-ncol(df)])))
+```
+
+    There are only 3 unique rows which contain missing values in the train data. 
+
+Delete these rows from the train data. 
+```{r}
+imputed_train <- na.omit(df[df$trainORtest=="train",])
+sum(is.na(imputed_train))
+```
+
+Let us work on the remaining missing values in the test data.  
+Though there are negligible rows with missing values these rows cannot be removed as predictions are to be submitted for all observations.
+```{r}
+imputed_test <- df[df$trainORtest=="test",]
+sum(is.na(imputed_test))
+sum(unique(is.na(imputed_test)))
+colmis(imputed_test)
+```
+
+**Apply central imputation**
+```{r}
+imputed_test <- centralImputation(imputed_test)
+```
+
+
+Combine train and test dataframes again
+```{r}
+df <- rbind(imputed_train,imputed_test)
+# rm(imputed_test,imputed_train)
+```
+
+## Feature Engineering
+```{r}
+df$AGEBuilt <- as.numeric(as.character(df$YrSold)) - df$YearBuilt
+df$AgeMod <- as.numeric(as.character(df$YrSold)) - df$YearRemodAdd
+df$TotalArea <- df$GrLivArea + df$X1stFlrSF + df$X2ndFlrSF
+df$FinishedBsmtSF <- df$BsmtFinSF1 + df$BsmtFinSF2
+df$TotalPorch <- df$OpenPorchSF + df$X3SsnPorch + df$ScreenPorch + df$EnclosedPorch
+
+## Remove the variables which dont provide any information or which are not useful in prediction.
+df$YearBuilt <- NULL
+df$YearRemodAdd <- NULL
+df$BsmtFinType2 <- NULL 
+df$BsmtFinSF2 <- NULL 
+df$LowQualFinSF <- NULL
+df$PoolArea <- NULL
+df$MiscVal <- NULL
+df$X3SsnPorch <- NULL
+```
+
+## Feature trasnformations
+
+**Target**
+```{r}
+hist(df$SalePrice[df$trainORtest=="train"])
+df$LogSalePrice <- ifelse(df$trainORtest=="train",log(df$SalePrice),0)
+df$SalePrice <- NULL
+```
+
+**Check for the skewness of the variables**
+```{r}
+num_var <- names(df)[sapply(df,is.numeric)]
+num_var <- num_var[num_var != "LogSalePrice"]
+sort(sapply(num_var,function(x)skewness(df[x])),decreasing = T)
+```
+
+**Perform the transformations on highly skewed variables**
+```{r}
+skewed_cols <- c()
+for(i in num_var){
+  if(abs(skewness(df[,i]))>=3){
+    skewed_cols <- c(skewed_cols,i)
+  }
+}
+for(i in skewed_cols){
+  df[,i] <- df[,i]+1
+  p1 <- powerTransform(df[,i])
+  df[,i] <- bcPower(df[,i],lambda = p1$lambda,gamma = 1)
+}
+
+rm(skewed_cols)
+```
+
+**Convert the categorical variables into factors**
+```{r}
+cat_var <- names(which(sapply(df, is.character)))
+df[,cat_var]<-lapply(df[,cat_var],function(x)as.factor(x))
+df$GarageYrBlt <- NULL
+df$YrSold <- as.factor(as.character(df$YrSold))
+```
+
+**Scaling and dummification**
+```{r}
+df[num_var] <- decostand(df[num_var],method = "standardize")
+
+df <- data.frame(model.matrix(LogSalePrice~.,data = df)[,-1])
+```
+
+### Save the preprocessed train and test data.
+```{r}
+saveRDS(object = df,file = "df_preprocessed")
+# saveRDS(object = df[df$trainORtest=="train",],file="train")
+# saveRDS(object = df[df$trainORtest=="test",],file = "test")
+```
+
+
+
